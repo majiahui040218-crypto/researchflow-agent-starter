@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "researchflow-agent-starter"
+version = "0.1.0"
+description = "An evidence-traceable technical research agent starter using LangGraph"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=1.0,<2",
+  "langgraph-checkpoint-sqlite>=2.0,<4",
+  "langchain-openai>=1.0,<3",
+  "langchain-tavily>=0.2,<2",
+  "fastapi>=0.110,<1",
+  "uvicorn>=0.30,<1",
+  "pydantic>=2.0,<3",
+  "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "httpx>=0.27,<1"]
+
+[project.scripts]
+researchflow = "researchflow.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,31 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.env
+.data/
+*.egg-info/
+build/
+dist/
+reports/
+# API Keys
+.env
+.env.local
+.env.*.local
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Database
+.data/
+*.sqlite
+
+# Local files
+.DS_Store
+*.bak
+
+# Downloaded patches
+researchflow-reliability-patch/
