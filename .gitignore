@@ -35,3 +35,7 @@ researchflow-reliability-patch/
 
 # Downloaded Tool Calling patch
 researchflow-tool-calling-v03/
+
+eval/results/
+
+researchflow-tool-eval-v04/
