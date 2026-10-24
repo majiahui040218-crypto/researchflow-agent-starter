@@ -29,3 +29,9 @@ __pycache__/
 
 # Downloaded patches
 researchflow-reliability-patch/
+
+# VS Code local settings
+.vscode/
+
+# Downloaded Tool Calling patch
+researchflow-tool-calling-v03/
