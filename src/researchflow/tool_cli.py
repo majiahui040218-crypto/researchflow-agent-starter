@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 import uuid
 
 # Use the same serialization safety setting as the existing research service.
@@ -23,6 +24,7 @@ from .providers import OpenAILanguage, ProviderCallError, _provider_error
 from .task_store import create_task, finish_task
 from .tool_agent import build_tool_agent
 from .research_tools import build_research_tools
+from .tool_trace import summarize_tool_trace
 
 
 class ScriptedDemoModel:
@@ -63,6 +65,8 @@ def run_tool_task(question: str, *, mode: str = "mock", settings=None, model=Non
         raise ValueError("mode must be mock or live")
 
     task_id = str(uuid.uuid4())
+    started = time.monotonic()
+    observed_state = {}
     state = {"question": question, "report": "", "warnings": [], "attempts": 0}
     create_task(settings.db_path, task_id, mode, question, state)
 
@@ -82,10 +86,21 @@ def run_tool_task(question: str, *, mode: str = "mock", settings=None, model=Non
 
         with SqliteSaver.from_conn_string(str(settings.db_path)) as checkpointer:
             graph = build_tool_agent(model, tools, max_tool_calls=3).compile(checkpointer=checkpointer)
-            result = graph.invoke(
-                {"messages": [HumanMessage(content=question)], "tool_calls_used": 0, "limit_reached": False},
-                config={"configurable": {"thread_id": task_id}, "recursion_limit": 16},
-            )
+            run_config = {"configurable": {"thread_id": task_id}, "recursion_limit": 16}
+            try:
+                result = graph.invoke(
+                    {"messages": [HumanMessage(content=question)], "tool_calls_used": 0, "limit_reached": False},
+                    config=run_config,
+                )
+            except Exception:
+                # Recover only the last *persisted* graph state. Failed model
+                # calls may have no AIMessage; never invent missing events.
+                try:
+                    snapshot = graph.get_state(run_config)
+                    observed_state = snapshot.values or {}
+                except Exception:
+                    observed_state = {}
+                raise
 
         final = result["messages"][-1]
         answer = str(final.content) if isinstance(final, AIMessage) else ""
@@ -93,11 +108,17 @@ def run_tool_task(question: str, *, mode: str = "mock", settings=None, model=Non
         for message in result["messages"]:
             if isinstance(message, AIMessage) and message.tool_calls:
                 trace.extend(str(call["name"]) for call in message.tool_calls)
+        audit = summarize_tool_trace(
+            result["messages"], mode=mode, complete=True,
+            limit_reached=bool(result.get("limit_reached")),
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
         state = {
             "question": question,
             "report": answer,
             "attempts": result.get("tool_calls_used", 0),
             "tool_names": trace,
+            "tool_trace": audit,
             "warnings": (["DEMO MODE: All tool results are synthetic."] if mode == "mock" else [])
             + (["Tool budget reached; pending tool calls were not executed."] if result.get("limit_reached") else []),
         }
@@ -111,7 +132,18 @@ def run_tool_task(question: str, *, mode: str = "mock", settings=None, model=Non
             failure = ProviderCallError("CONFIG_MISSING", "Live 模式缺少模型或搜索 API Key")
         else:
             failure = _provider_error(exc)
-        failed = {"question": question, "report": "", "warnings": [f"Task failed: {failure.code}"]}
+        audit = summarize_tool_trace(
+            observed_state.get("messages", []), mode=mode, complete=False,
+            limit_reached=bool(observed_state.get("limit_reached")),
+            duration_ms=(time.monotonic() - started) * 1000,
+            error_code=failure.code,
+        )
+        failed = {
+            "question": question,
+            "report": "",
+            "warnings": [f"Task failed: {failure.code}"],
+            "tool_trace": audit,
+        }
         finish_task(settings.db_path, task_id, "failed", failed, failure.code, str(failure))
         return {"task_id": task_id, "mode": mode, "status": "failed", "error_code": failure.code,
                 "error_message": str(failure), **failed}
