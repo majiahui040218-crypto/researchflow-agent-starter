@@ -1,123 +1,90 @@
-# ResearchFlow Agent Starter
+# ResearchFlow Agent
 
-A beginner-friendly LangGraph implementation of a **source-traceable technical research workflow** for an AI Agent internship portfolio. Built as an independent teaching scaffold; not a fork of DeepAgents.
+[中文说明](README.zh-CN.md) · [Architecture](docs/ARCHITECTURE.md) · [Tool calling guide](README_TOOL_CALLING.md) · [Tool evaluation](README_TOOL_EVAL.md) · [Trace guide](README_TOOL_TRACE.md)
 
-## Features in this starter (v0.1)
+A small but working **LangGraph research agent** with two separate execution paths: a planning/search/report workflow, and an LLM-driven tool-calling agent. Designed to be understandable, testable, and safe to demonstrate in an AI Agent engineering internship interview.
 
-- Real LangGraph `StateGraph` with `plan -> search -> reflect -> write -> validate` and conditional search loop.
-- OpenAI model (via `langchain-openai`) and Tavily search in live mode.
-- Offline mock mode requiring no API keys; **its data is synthetic, not factual**.
-- Search budget hard limit (default 3, max 5 searches per task).
-- Search result URL deduplication, stable source IDs, and unknown citation-ID detection.
-- SQLite graph checkpoints keyed by task ID.
-- Synchronous FastAPI endpoint, GET by task ID, and CLI.
-- Unit tests and simple engineering evaluation CSV export.
+> **Evidence boundary:** Mock runs use synthetic scripted data. One **real** `qwen3.8-chat` + GitHub tool-calling run was completed and traced on 2026-10-26. This does **not** establish reliability, accuracy, or latency percentiles across runs.
 
-**What v0.1 does NOT do:** semantic fact verification; full-page trusted content fetching; async queue, long-running tasks, frontend, human approvals, safe web navigation, MCP, or multi-agent collaboration. Citation-ID validation alone does not prove a claim is supported by its source.
+## What is implemented
 
-## Requirements
+- **Research graph:** `plan → search → reflect → write → validate` with a search budget.
+- **Tool agent:** LangGraph `bind_tools` + `ToolNode`; tool selection by the LLM in live mode, deterministic scripted selection in mock mode; per-task tool-call budget.
+- **Read-only tools:** `github_repo_info(owner/repo)` and `web_search(query)`.
+- **Durability:** SQLite checkpoints and terminal task records (success/failure).
+- **Observability:** queryable execution trace: model responses observed, tool requests/results, safe argument *names* (not values), available token usage, duration, error category.
+- **Evaluation:** scripted, offline tool-selection/fault/budget cases; results explicitly marked as mock, **not** real LLM accuracy.
+- **CI:** GitHub Actions runs offline tests and scripted smoke checks; **no API secrets or model calls**.
+- **Configuration doctor:** a local CLI surfaces shell-versus-`.env` differences without printing API keys.
 
-- Python 3.11+ (3.11 or 3.12 is a conservative choice)
-- macOS/Linux/Windows
-- Internet plus provider credentials for **live** mode only
+## Run locally
 
-## Install and run offline demo
+Use Python 3.12 (3.11+ is declared in `pyproject.toml`):
 
 ```bash
-python3.12 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
 cp .env.example .env
-python -m researchflow.cli 'Compare LangGraph and CrewAI in Python'
+python -m researchflow.config_doctor
+python -m pytest -q
+python -m researchflow.tool_cli --mode mock '查询 LangGraph 的 GitHub 仓库信息'
+python -m researchflow.tool_eval --mode mock
 ```
 
-In the default `RESEARCHFLOW_MODE=mock` configuration, both the planning and search providers use deterministic demo content. The demo verifies the flow; it does not investigate actual websites.
+The `mock` mode does **not** call an LLM or GitHub and must never be reported as real-world research performance.
 
-## Run with real model and web search
+### Live OpenAI-compatible model
 
-Edit `.env` to include:
+Set `.env` with credentials and a model ID actually available to your provider:
 
 ```dotenv
 RESEARCHFLOW_MODE=live
-OPENAI_API_KEY=your_actual_openai_api_key
-OPENAI_MODEL=gpt-4o-mini
-TAVILY_API_KEY=your_actual_tavily_api_key
-RESEARCHFLOW_MAX_SEARCHES=3
+OPENAI_BASE_URL=https://api.llm.ustc.edu.cn/v1
+OPENAI_MODEL=qwen3.8-chat
+OPENAI_API_KEY=YOUR_NEW_KEY
+TAVILY_API_KEY=YOUR_NEW_TAVILY_KEY
+RESEARCHFLOW_LLM_RETRIES=0
 ```
 
-Never commit `.env` or API keys. You need valid API credentials and sufficient quota. Provider API calls may incur charges. Live mode uses two kinds of external services: OpenAI model calls and Tavily web search. Query quality and provider latency vary.
+These are **examples** from one validated USTC environment, not universal model names or access guarantees. The tool-agent currently initializes both GitHub and Tavily tools, so it expects a Tavily key even for GitHub questions. Live calls may be rate-limited or billed.
 
-Test from CLI:
+Configuration priority is **shell environment > `.env`** (`load_dotenv()` without override). If shell and file disagree, run:
 
 ```bash
-python -m researchflow.cli 'Compare LangGraph and CrewAI: architecture and tradeoffs'
+python -m researchflow.config_doctor
+unset OPENAI_MODEL  # only if the doctor reports a stale shell override
 ```
 
-## API demo
+V0.6 also supports an optional explicit model HTTP proxy:
+
+```dotenv
+# RESEARCHFLOW_HTTP_PROXY=http://127.0.0.1:7890
+```
+
+Leave it unset if your existing IPv4-direct/TUN route already works. This setting affects **model** requests, not Tavily or GitHub traffic; it does not modify macOS system proxy settings. Do not use `verify=False` to work around TLS issues.
+
+Run exactly one live tool test once configuration is verified:
 
 ```bash
-uvicorn researchflow.api:app --host 127.0.0.1 --port 8000 --reload
+python -m researchflow.tool_cli --mode live \
+  '请调用 GitHub 工具，查询 langchain-ai/langgraph 仓库的 Stars 和 Forks'
+python -m researchflow.tool_trace_cli --task-id YOUR_TASK_UUID
 ```
 
-In another terminal:
+Check `mode=live`, `synthetic=false`, and `tool_results_observed >= 1` before claiming real tool execution.
 
-```bash
-curl -s http://127.0.0.1:8000/health
-curl -s -X POST http://127.0.0.1:8000/research \
-  -H 'Content-Type: application/json' \
-  -d '{"question": "Compare LangGraph and CrewAI for Python developers"}'
-```
+## Observed live validation (one sample)
 
-The `POST /research` response returns a UUID task ID, report, source records, search count, and warnings. Use `GET /research/{task_id}` to retrieve the saved result. This is a **blocking synchronous demo endpoint**, NOT a background job queue. A long search may cause a client timeout; job queues and async processing are later enhancements.
+In a user-run `qwen3.8-chat` test on 2026-10-26, the agent completed a real GitHub repository lookup with **1 tool call, 2 model responses observed, 1 tool result, 1,130 input tokens, 154 output tokens, and 6,553.4 ms task duration**. These are **single-run observations**, not benchmark averages or an SLA. A previous V0.5 local test run returned **50 passed**; V0.6 requires a fresh regression run.
 
-## Tests
+## Security and limitations
 
-```bash
-python -m pytest -q
-python eval/run_eval.py
-```
+- `.env`, SQLite databases, generated evaluation output, and local backups are ignored by Git.
+- Traces intentionally omit raw prompt text, argument values, tool result content, and exception bodies.
+- Search snippets/tool responses are treated as untrusted external data.
+- The current report validator checks unknown citation IDs, **not semantic factual entailment**.
+- FastAPI research endpoint is synchronous and not safe for public unauthenticated deployment.
+- Provider/model availability and tool-calling support vary; never treat `models.list()` alone as proof of tool calling.
 
-The evaluation CSV is written to `reports/engineering_eval.csv`; it reports latency, tool-call count, and citation-ID errors. **These metrics are not evidence accuracy scores.** To measure answer correctness or evidence support, build an independently annotated dataset and conduct human/LLM-as-judge evaluation with manual spot checks.
-
-## Agent flow
-
-```text
-START -> plan -> search -> reflect --more_needed--> search
-                            |
-                            +--done--> write -> validate -> END
-```
-
-- `plan`: LLM proposes up to two targeted queries.
-- `search`: one tool call per graph step; assign stable citation IDs after deduplication.
-- `reflect`: continue queued searches; optionally plan a final follow-up; hard budget prevents infinite loops.
-- `write`: generate a Markdown report using supplied snippets and source IDs.
-- `validate`: detect unknown `[S<number>]` citations; report warnings rather than claiming semantic correctness.
-
-For a real portfolio, improve this starter to support trustworthy source content, evidence-level validation, retry/backoff, precise cost monitoring, and a fixed test set with manually annotated expected evidence.
-
-## File layout
-
-```text
-src/researchflow/
-  config.py       Environment variables and provider mode
-  schemas.py      ResearchState, source normalization, citation checks
-  providers.py    Mock / Tavily search and Mock / OpenAI language
-  graph.py        LangGraph nodes, edges, conditional loop
-  service.py      Run graph and persist to SQLite
-  api.py          HTTP endpoints
-  cli.py          Command-line entry point
-tests/             Unit and graph-level tests
-eval/              Example evaluation questions and runner
-docs/ROADMAP.md    Learning and interview-oriented milestones
-```
-
-## Docs and reference repositories
-
-- https://docs.langchain.com/oss/python/langgraph/quickstart
-- https://docs.langchain.com/oss/python/langgraph/persistence
-- https://docs.langchain.com/oss/python/integrations/tools/tavily_search
-- https://github.com/langchain-ai/langgraph-101
-- https://github.com/langchain-ai/deepagents
-
-This starter is deliberately smaller than a full Deep Research platform so that a Python developer new to LangGraph can understand every function and discuss personal contributions at an interview.
+See [Architecture](docs/ARCHITECTURE.md) and [Resume / interview guide](docs/RESUME_GUIDE.md) for design trade-offs and supported claims.

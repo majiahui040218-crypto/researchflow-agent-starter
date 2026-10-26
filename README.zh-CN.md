@@ -1,149 +1,128 @@
-# ResearchFlow：基于 LangGraph 的技术调研 Agent（实习简历项目）
+# ResearchFlow：基于 LangGraph 的技术调研 Agent
 
-适合有 Python 项目基础、尚未接触 LangGraph 的开发者。本仓库是一份**可继续开发的 v0.1 工程骨架**，不是最终版简历项目；请根据实际完成的功能和评测结果撰写简历。
+[English README](README.md) · [架构说明](docs/ARCHITECTURE.md) · [工具评测](README_TOOL_EVAL.md) · [执行轨迹](README_TOOL_TRACE.md) · [简历与面试](docs/RESUME_GUIDE.md)
 
-## 0. 先看清楚这两个运行模式
+一个可运行、可测试、可追溯的 **LangGraph Agent 工程项目**，适用于展示大模型应用开发实习相关能力。项目保留两条独立链路：规划/检索/报告工作流，以及由真实模型使用 `bind_tools` 选择工具的 Tool Calling Agent。
 
-| 模式 | 配置 | 效果 | 用途 |
-|---|---|---|---|
-| 模拟模式 | `RESEARCHFLOW_MODE=mock`（默认） | 使用合成的演示检索结果，产出标有 DEMO 的报告 | 验证节点、条件路由、数据库与 API，无需密钥 |
-| 真实模式 | `RESEARCHFLOW_MODE=live` | 调用 OpenAI 兼容的 LangChain ChatOpenAI 配置与 Tavily 实时搜索 | 真实调研（需要可用 API Key 与配额） |
+> **证据边界：** Mock 是脚本模拟，不代表模型智能。2026-10-26 已在本机用 `qwen3.8-chat` 成功完成一次真实 GitHub 工具调用并保存 SQLite 轨迹，但一次成功不等于模型长期稳定或评测准确率。
 
-**重要：模拟模式不能当作真实检索准确率。** 当前的 Validator 只检查引用 `[S1]` 是否存在，不能证明某句话得到了来源的事实支持。
+## 1. 功能与实现情况
 
-## 1. 最小环境与启动（macOS）
+| 模块 | 实现 | 验证方式 |
+|---|---|---|
+| 研究流程 | `plan → search → reflect → write → validate`，检索预算 | Mock 工作流测试 |
+| 自主工具选择 | LangGraph `bind_tools` + `ToolNode`，GitHub / Web Search | Qwen 真实 Tool Calling 成功一次 |
+| 外部工具 | 只读 GitHub 仓库 API / Tavily 搜索 | GitHub 实时数据返回 |
+| 状态持久化 | SQLite checkpoint + 任务成功/失败记录 | 用 `task_id` 查询 |
+| 可观测性 | 工具请求/执行、Token 观测、耗时、异常分类 | `tool_trace_cli` |
+| 评测 | 工具选择、工具故障、预算拦截离线场景 | `tool_eval --mode mock`，非真实模型准确率 |
+| 工程质量 | pytest、GitHub Actions 离线 CI、配置诊断 | 本机与 CI 测试 |
 
-建议 Python 3.11 或 3.12（也声明支持 3.11+），联网安装依赖。
+## 2. 五分钟启动（Mock，不需要密钥）
 
 ```bash
-unzip researchflow-agent-starter.zip
-cd researchflow-agent-starter
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -e '.[dev]'
 cp .env.example .env
-python -m researchflow.cli 'Compare LangGraph and CrewAI for Python developers'
+python -m researchflow.config_doctor
 python -m pytest -q
+python -m researchflow.tool_cli --mode mock '请查询 LangGraph 的 GitHub 仓库信息'
+python -m researchflow.tool_eval --mode mock
 ```
 
-模拟模式生成的报告会明确展示 `DEMO` 警告，并不会宣称它访问了真实网页。单机服务：
+Mock 输出会明确标注 `DEMO`，GitHub 数据为合成数据。CI 同样只运行离线测试，**不消耗 API 额度**。
 
-```bash
-uvicorn researchflow.api:app --host 127.0.0.1 --port 8000 --reload
-```
+## 3. 真实模型接入（以已验证的 USTC Qwen 为例）
 
-打开 `http://127.0.0.1:8000/docs`，先执行 POST `/research`，再将返回的 `task_id` 放入 GET `/research/{task_id}` 中，验证 SQLite 持久化读回。注意：POST 当前是**同步阻塞接口**，不是异步任务系统。请勿未经鉴权将此服务部署为公开 API。
-
-### 切换真实模式
-
-在 `.env` 中改成：
+在**本机** `.env` 中配置（以下占位符不是实际密钥）：
 
 ```dotenv
 RESEARCHFLOW_MODE=live
-OPENAI_API_KEY=your_key
-OPENAI_MODEL=gpt-4o-mini
-TAVILY_API_KEY=your_key
-RESEARCHFLOW_MAX_SEARCHES=3
+RESEARCHFLOW_DB=.data/researchflow.sqlite
+RESEARCHFLOW_MAX_SEARCHES=1
+RESEARCHFLOW_LLM_RETRIES=0
+
+OPENAI_BASE_URL=https://api.llm.ustc.edu.cn/v1
+OPENAI_MODEL=qwen3.8-chat
+OPENAI_API_KEY=YOUR_NEW_USTC_KEY
+TAVILY_API_KEY=YOUR_NEW_TAVILY_KEY
+
+# 可选：仅给模型 HTTP 客户端指定显式代理
+# RESEARCHFLOW_HTTP_PROXY=http://127.0.0.1:7890
 ```
 
-模型和搜索 API 需分别具备有效访问权限，可能产生费用；切勿将 `.env` 或密钥提交到 GitHub。配置完成后运行：
+上述模型名及接口依赖服务商当前授权；不同提供方应使用自己控制台列出的模型 ID。即使只问 GitHub，当前 Tool Agent 仍会初始化 Tavily 搜索工具，所以 Live 模式需要 Tavily Key；后续可优化为按需初始化。
+
+**配置优先级为终端环境变量 > `.env`。** 这正是一次真实排错中发现的坑：终端旧 `OPENAI_MODEL=deepseek-v4-flash` 覆盖了 `.env` 的 `qwen3.8-chat`，导致 Agent 失败。V0.6 提供不打印密钥的诊断命令：
 
 ```bash
-python -m researchflow.cli 'Compare LangGraph and CrewAI: architecture, state management and tools'
+python -m researchflow.config_doctor
+# 如果提示 OPENAI_MODEL 冲突：
+unset OPENAI_MODEL
+python -m researchflow.config_doctor
 ```
 
-## 2. 当前代码结构（已实现的 v0.1）
+网络默认沿用 V0.5 已工作过的 IPv4 直连客户端，并显式忽略 `HTTP_PROXY` 等环境变量。**如需模型 API 经过 ClashX**，可设置 `RESEARCHFLOW_HTTP_PROXY=http://127.0.0.1:7890`。此选项只影响模型请求，不影响 GitHub/Tavily；不用为了项目关闭 ChatGPT 的系统代理。不要关闭 TLS 证书校验。
 
-```text
-researchflow-agent-starter/
-├── pyproject.toml                 # Python 依赖与 CLI 入口
-├── .env.example                   # 模拟/真实模式配置模板
-├── README.md                      # 英文说明
-├── README.zh-CN.md                # 本文档
-├── src/researchflow/
-│   ├── schemas.py                 # ResearchState / Source / 引用校验 / URL 去重
-│   ├── config.py                  # 配置校验
-│   ├── providers.py               # Mock 与 Live 两套 LLM/搜索接口
-│   ├── graph.py                   # plan -> search -> reflect -> write -> validate
-│   ├── service.py                 # 编译 Graph / SQLite 检查点 / 任务 ID
-│   ├── api.py                     # FastAPI POST/GET/health
-│   └── cli.py                     # 命令行运行
-├── tests/
-│   ├── test_schemas.py            # URL 去重与引用检查
-│   └── test_workflow.py           # 模拟模式端到端图测试
-├── eval/
-│   ├── questions.jsonl            # 示例问题（非标注真值）
-│   └── run_eval.py                # 运行时长、搜索次数等工程指标
-└── docs/
-    └── ROADMAP.md                # 4 周开发计划
+执行真实 Tool Calling（可能产生调用费用/额度消耗，建议先单次验证）：
+
+```bash
+python -m researchflow.tool_cli --mode live \
+  '请调用 GitHub 工具，查询 langchain-ai/langgraph 仓库的 Stars 和 Forks'
 ```
 
-## 3. 核心流程，逐个读懂
+复制成功输出中的 `task_id`：
 
-```text
-START
-  └─ plan: 将问题拆为 1~2 条检索查询
-      └─ search: 调一次检索工具，规范 URL 并赋予 S1/S2... 证据编号
-          └─ reflect: 是否应继续搜索？
-              ├─ 是、未到预算：回到 search
-              └─ 否/已到预算：write -> validate -> END
+```bash
+python -m researchflow.tool_trace_cli --task-id YOUR_TASK_UUID
 ```
 
-`max_searches` 为硬性搜索次数上限；`state` 保存已检索词、搜索次数、证据列表、报告和警告。每次运行会生成唯一 `task_id` 用于 SQLite Checkpointer 的 `thread_id`。当前 `plan`/`reflect` 由 LLM 给出结构化输出，但搜索是由固定节点发起。**v0.1 尚未接入模型原生 `bind_tools` 工具选择，更不是多 Agent 项目。**
+检查 `status=completed`、`mode=live`、`synthetic=false`、`tool_results_observed>=1`、`complete=true`，才能说明真实工具执行与轨迹保存均完成。
 
-## 4. 4 周开发与可验收目标
+## 4. 单次真实验证结果（不是性能基准）
 
-| 时间 | 自己真正要完成的改动 | 验收方式 |
-|---|---|---|
-| 第 1 周 | 阅读 StateGraph、实现/调整 `ResearchState`、跑通 2 种模式、跟踪一次完整节点日志 | mock CLI 与 API 运行、真实模式完成 1 个任务、可讲清每个状态字段 |
-| 第 2 周 | 加入 `tools/`，将网页搜索和后续 GitHub API 封装为结构化工具；实现一个原生 Tool Calling 分支（LLM 可以在工具间做选择）；设置次数上限和参数校验 | 证明模型根据不同问题调用不同工具；测试无工具、工具出错、无搜索结果三种情况 |
-| 第 3 周 | 证据校验：按事实陈述建立来源映射；完整内容抓取与不可信内容隔离；重试/超时/成本记录；异步任务（可按时间延期） | 给出至少 3 例失败分析、恢复日志和错误处理自动化测试 |
-| 第 4 周 | 建立至少 30 道固定测试题、人工标注重要证据；比较 v0.1 基线与改进版，并补充演示页面、README 和技术架构图 | 形成公开可复现的对照表，分析效果、延迟、费用和失败原因 |
+2026-10-26 的一次用户本机运行记录：
 
-### 第二周建议增加的最终目录（尚未在 v0.1 实现）
+| 记录项 | 单次观测值 |
+|---|---:|
+| 模型 | `qwen3.8-chat` |
+| 工具 | `github_repo_info` |
+| 模型响应次数（已观测） | 2 |
+| 工具调用请求 | 1 |
+| 工具结果已观测 | 1 |
+| 输入 / 输出 Token | 1,130 / 154 |
+| 任务耗时 | 6,553.4 ms |
+| SQLite 轨迹 | `complete=true`，`synthetic=false` |
+
+此前 V0.5 本机回归测试 `50 passed`；V0.6 引入新测试后须重新运行，不能沿用旧测试数作为新版本结果。Mock V0.4 评测 `6/6` 只验证脚本场景，不代表真实 LLM 工具选择准确率为 100%。
+
+## 5. 代码结构
 
 ```text
 src/researchflow/
-├── tools/
-│   ├── web_search.py              # web_search(query)
-│   └── github_repo.py             # github_repo(repo_url) 元数据工具
-├── agents/
-│   └── tool_agent.py              # bind_tools / ToolNode / 工具路由
-├── evaluation/
-│   ├── retrieval.py               # 证据命中指标
-│   └── citation_support.py        # 人工标注支持率评测
-└── observability/
-    └── tracing.py                 # 关键步骤日志与调用消耗
+  graph.py              研究工作流 StateGraph
+  tool_agent.py         bind_tools + ToolNode 条件路由与预算保护
+  research_tools.py     GitHub / Tavily 工具与输入校验
+  providers.py          Mock/Live Provider 与异常分类
+  network.py            显式模型 HTTP 代理（V0.6）
+  config.py             模式、模型、数据库等配置
+  config_doctor.py      无网络、无密钥泄漏的配置诊断（V0.6）
+  service.py            研究任务执行、SQLite 持久化
+  tool_cli.py           Agent 工具调用 CLI
+  tool_trace.py         安全执行轨迹汇总
+  tool_trace_cli.py     按 task_id 查询轨迹
+  tool_eval.py          Mock 工具评测
+.github/workflows/tests.yml  仅离线 pytest + Mock CI
 ```
 
-先做 1 个工具，再做 2 个工具，不要一开始就把搜索、浏览器、GitHub、数据库、MCP 全部塞进一个 Agent。
+## 6. 已知限制和安全原则
 
-## 5. 简历可以怎样写（功能完成后再写）
+- 当前没有完成 **人工标注事实支持率** 评测，不能宣称消除幻觉或达到生产级准确率。
+- 任务耗时和 Token 是**单次结果**，不代表平均时延、P95 或成本。
+- Mock 模式的工具数据不真实；只读 GitHub 工具不会修改仓库。
+- Tool Trace 不保存原始模型 Prompt、工具参数值、工具正文、API Key 或异常原文，只记录观察到的事件。
+- FastAPI 的 POST `/research` 是同步接口；没有任务队列、权限验证或多租户隔离，不能直接对公网开放。
+- `.env`、数据库、生成的评测结果、备份文件应保持在 Git 仓库之外。
 
-> **ResearchFlow｜基于 LangGraph 的技术调研 Agent**：设计技术研究规划、网页检索、条件反馈与报告生成工作流；实现检索次数/成本预算、来源追踪、SQLite 状态持久化和 FastAPI 服务。构建固定评测集，评估来源支持率、任务完成率、P95 延迟与模型成本，并通过 A/B 实验分析改进效果。
-
-不能直接把框架自带的功能写成个人创新。没有实现 `bind_tools` 就不要写“模型自主调用多工具”；没有证据语义标注就不要写“幻觉降低 X%”。
-
-## 6. 面试必须能够解释的 8 个问题
-
-1. LangGraph 解决了普通 Python `if/else` + 函数调用中的什么问题？
-2. StateGraph 的 State 和节点返回值有什么区别？
-3. 条件边何时让搜索循环结束？如何避免无限循环和费用失控？
-4. 结构化输出与原生 Tool Calling 有什么区别？你的第一版属于哪一种？
-5. 为什么使用 SQLite Checkpointer？`thread_id` 对一次任务意味着什么？
-6. 一个引用 ID 存在，为什么不能证明报告陈述为真？
-7. 如何保证搜索到的网页文本不能通过提示词注入干扰 Agent？
-8. 比较两种 Agent 方案时，如何固定数据集、模型和预算才能公平？
-
-## 7. 当前构建验证范围
-
-已执行静态编译和基础测试。基础测试 **3 passed，1 skipped**，跳过的是需要 LangGraph 依赖的端到端测试。构建环境因网络解析限制无法下载依赖，所以**没有对真实 LangGraph 运行或外部 API 访问作出已验证声明**。在自己的开发环境安装依赖后执行 `python -m pytest -q`，并分别验证 mock/live 两种模式。
-
-### 参考项目和文档
-
-- LangGraph: https://github.com/langchain-ai/langgraph
-- LangGraph Quickstart: https://docs.langchain.com/oss/python/langgraph/quickstart
-- LangGraph SQLite: https://reference.langchain.com/python/langgraph.checkpoint.sqlite
-- Tavily: https://reference.langchain.com/python/langchain-tavily/tavily_search/TavilySearch
-- DeepAgents: https://github.com/langchain-ai/deepagents
+建议把真正证明做过的功能写进简历。详见 [面试说明](docs/RESUME_GUIDE.md)。

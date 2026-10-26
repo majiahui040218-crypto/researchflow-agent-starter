@@ -225,10 +225,15 @@ class OpenAILanguage:
             raise ValueError("RESEARCHFLOW_LLM_RETRIES must be 0..2")
 
         # Earlier network diagnostics showed this Mac could reach GLM through IPv4.
+        # self._http_client = httpx2.Client(
+        #     transport=httpx2.HTTPTransport(local_address="0.0.0.0"),
+        #     trust_env=False,
+        #     timeout=60.0,
+        # )
         self._http_client = httpx2.Client(
-            transport=httpx2.HTTPTransport(local_address="0.0.0.0"),
-            trust_env=False,
-            timeout=60.0,
+        proxy="http://127.0.0.1:7890",
+        trust_env=False,
+        timeout=60.0,
         )
         kwargs = {
             "model": model,
@@ -238,6 +243,16 @@ class OpenAILanguage:
             "max_tokens": 2048,
             "http_client": self._http_client,
         }
+        # 显式使用 .env 中配置的模型服务地址和密钥
+        base_url = (os.getenv("OPENAI_BASE_URL") or "").strip()
+        api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+
+        if base_url:
+            kwargs["base_url"] = base_url
+
+        if api_key:
+            kwargs["api_key"] = api_key
+
         if model.lower().startswith("glm-"):
             kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
         try:
